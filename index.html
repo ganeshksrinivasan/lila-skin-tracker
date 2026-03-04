@@ -546,12 +546,16 @@ function App() {
     })();
   },[]);
 
-  const enriched = spots.map(s=>({
-    ...s,
-    x: parseFloat(s.x), y: parseFloat(s.y),
-    lastCream: lastCream(creamLog, s.id),
-    consecutive: consecutiveDays(creamLog, s.id),
-  }));
+  const enriched = spots.map(s=>{
+    const id = s.id || s.spot_id;
+    return {
+      ...s,
+      id,
+      x: parseFloat(s.x), y: parseFloat(s.y),
+      lastCream: lastCream(creamLog, id),
+      consecutive: consecutiveDays(creamLog, id),
+    };
+  });
 
   const handleBodyClick = useCallback((x,y)=>{
     const viewSpots = enriched.filter(s=>s.view===view);
