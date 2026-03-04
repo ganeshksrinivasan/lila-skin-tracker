@@ -51,6 +51,9 @@ const api = {
   logAnti:     dose      => gasGet({ action:"log_anti", dose_ml:dose }),
   addSpot:     p         => gasGet({ action:"add_spot", ...p }),
   updateSpot:  (id, act) => gasGet({ action:"update_spot", spot_id:id, active:act?"1":"0" }),
+  deleteCream: (ts)      => gasGet({ action:"delete_cream", timestamp:ts }),
+  deleteAnti:  (ts)      => gasGet({ action:"delete_anti",  timestamp:ts }),
+  deleteSpot:  (id)      => gasGet({ action:"delete_spot",  spot_id:id }),
 };
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -328,7 +331,7 @@ function CreamModal({ spot, onConfirm, onCancel }) {
 }
 
 // ── SPOT PANEL ────────────────────────────────────────────────────────────────
-function SpotPanel({ spot, logs, onClose, onLog, onToggleActive }) {
+function SpotPanel({ spot, logs, onClose, onLog, onToggleActive, onDeleteEntry, onDeleteSpot }) {
   const hist  = spotLogs(logs, spot.id);
   const grid  = weekGrid(logs, spot.id);
   const wl    = weekLabels();
@@ -403,6 +406,7 @@ function SpotPanel({ spot, logs, onClose, onLog, onToggleActive }) {
                   <div style={{flex:1,fontSize:13,color:"#1E0F0A",fontWeight:500}}>{date}</div>
                   <div style={{fontSize:12,color:"#9B8B7E",minWidth:36}}>{time}</div>
                   <div style={{fontSize:12,fontWeight:700,color:cc?.color||"#888",minWidth:42,textAlign:"right"}}>{cc?.label||e.cream_colour}</div>
+                  <button onClick={()=>onDeleteEntry(e.timestamp)} style={{marginLeft:8,background:"none",border:"none",cursor:"pointer",fontSize:14,color:"#C8B8B0",padding:"0 2px",lineHeight:1}} title="Delete">🗑</button>
                 </div>
               );
             })}
@@ -412,6 +416,7 @@ function SpotPanel({ spot, logs, onClose, onLog, onToggleActive }) {
         <div style={{padding:"12px 20px 36px",borderTop:"1px solid #EDE7E0",display:"flex",gap:10}}>
           {act && <button onClick={onLog} style={{flex:1,padding:"13px",borderRadius:12,background:"#1E0F0A",color:"#fff",border:"none",fontWeight:700,fontSize:14,cursor:"pointer"}}>Log Application</button>}
           <button onClick={onToggleActive} style={{padding:"13px 15px",borderRadius:12,background:"#F0EBE5",color:"#7A6A60",border:"none",fontSize:13,cursor:"pointer",flex:act?0:1}}>{act?"Mark Inactive":"Reactivate"}</button>
+          <button onClick={onDeleteSpot} style={{padding:"13px 12px",borderRadius:12,background:"#FFF0F0",color:"#C1121F",border:"1px solid #FFCDD2",fontSize:13,cursor:"pointer"}}>Delete Spot</button>
         </div>
       </div>
     </div>
@@ -476,6 +481,7 @@ function AntihistamineTab({ antiLog, onLog }) {
               <div style={{flex:1,fontSize:13,color:"#1E0F0A"}}>{date}</div>
               <div style={{fontSize:12,color:"#9B8B7E"}}>{time}</div>
               <div style={{fontSize:13,fontWeight:700,color:"#1E0F0A"}}>{e.dose_ml}</div>
+              <button onClick={async()=>{setAntiLog(p=>p.filter(l=>l.timestamp!==e.timestamp));try{await api.deleteAnti(e.timestamp);}catch(ex){}}} style={{marginLeft:4,background:"none",border:"none",cursor:"pointer",fontSize:14,color:"#C8B8B0",padding:"0 2px"}} title="Delete">🗑</button>
             </div>
           );
         })}
@@ -548,6 +554,20 @@ function App() {
     setSpots(p=>p.map(s=>s.id===spot.id?{...s,active:newAct}:s));
     setSelectedSpot(null);
     try { await api.updateSpot(spot.id,newAct==="1"); } catch(e){}
+  };
+
+  const handleDeleteEntry = async(timestamp)=>{
+    setCreamLog(p=>p.filter(l=>l.timestamp!==timestamp));
+    try { await api.deleteCream(timestamp); } catch(e){}
+  };
+
+  const handleDeleteSpot = async()=>{
+    const spot=selectedSpot;
+    if(!window.confirm(`Delete "${spot.name||spot.spot_name}" and all its logs?`)) return;
+    setSpots(p=>p.filter(s=>s.id!==spot.id));
+    setCreamLog(p=>p.filter(l=>l.spot_id!==spot.id));
+    setSelectedSpot(null);
+    try { await api.deleteSpot(spot.id); } catch(e){}
   };
 
   const handleLogAnti = async(dose)=>{
@@ -649,7 +669,7 @@ function App() {
 
       {/* Modals */}
       {pendingCoords&&<AddSpotModal onConfirm={handleAddSpot} onCancel={()=>setPendingCoords(null)}/>}
-      {selEnriched&&!showCreamModal&&<SpotPanel spot={selEnriched} logs={creamLog} onClose={()=>setSelectedSpot(null)} onLog={()=>setShowCreamModal(true)} onToggleActive={handleToggleActive}/>}
+      {selEnriched&&!showCreamModal&&<SpotPanel spot={selEnriched} logs={creamLog} onClose={()=>setSelectedSpot(null)} onLog={()=>setShowCreamModal(true)} onToggleActive={handleToggleActive} onDeleteEntry={handleDeleteEntry} onDeleteSpot={handleDeleteSpot}/>}
       {selEnriched&&showCreamModal&&<CreamModal spot={selEnriched} onConfirm={handleLogCream} onCancel={()=>setShowCreamModal(false)}/>}
     </div>
   );
