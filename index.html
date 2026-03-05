@@ -3,16 +3,17 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
-  <title>Lila's Skin Tracker v4</title>
+  <title>Lila's Skin Tracker</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet"/>
   <style>
     *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-    body{font-family:'DM Sans',sans-serif;background:#F5EFE8;overflow:hidden;height:100%}
-    .zoom-btn{position:absolute;bottom:20px;right:20px;background:#1E0F0A;color:#fff;border:none;padding:12px 20px;border-radius:30px;font-weight:700;box-shadow:0 4px 15px rgba(0,0,0,0.2);z-index:100}
-    .region-label{position:absolute;top:80px;left:50%;transform:translateX(-50%);background:rgba(255,255,255,0.8);padding:4px 12px;border-radius:12px;font-size:12px;font-weight:700;color:#7A6A60;pointer-events:none}
+    html,body,#root{height:100%;overflow:hidden}
+    body{font-family:'DM Sans',sans-serif;background:#F5EFE8}
+    input,button{font-family:'DM Sans',sans-serif}
+    ::-webkit-scrollbar{width:0;height:0}
   </style>
 </head>
 <body>
@@ -22,107 +23,579 @@ const { useState, useRef, useEffect, useCallback } = React;
 
 const GAS_URL = "https://script.google.com/macros/s/AKfycbyiu3OjV6tSlKnVouU_EJIHbPvC29kjLnjlhyNFohaqHWZgiW8dAQ9ZAP2rzNCc9Fte/exec";
 
-// REGION DEFINITIONS (x, y, width, height)
-const REGIONS = {
-  HEAD:  { x: 30, y: 0,   w: 40, h: 45,  label: "Head & Neck" },
-  TORSO: { x: 15, y: 35,  w: 70, h: 80,  label: "Torso" },
-  ARMS:  { x: 0,  y: 35,  w: 100,h: 90,  label: "Arms & Hands" },
-  LEGS:  { x: 20, y: 100, w: 60, h: 110, label: "Legs & Feet" }
+const CREAMS = {
+  black:  { color:"#1C1C1E", label:"Black"  },
+  red:    { color:"#C1121F", label:"Red"    },
+  yellow: { color:"#D4900A", label:"Yellow" },
+  green:  { color:"#2A9D8F", label:"Green"  },
 };
+const SLOTS = [
+  { id:"morning", label:"Morning", emoji:"☀️" },
+  { id:"night",   label:"Night",   emoji:"🌙" },
+];
+const VIEWS = ["FRONT","RIGHT","BACK","LEFT"];
+const DAYS  = ["M","T","W","T","F","S","S"];
 
-const SPOT_TYPES = {
-  FLARE: { color: "#C1121F", label: "Active Flare" },
-  SCAR:  { color: "#8B7E74", label: "Scar / Mark" },
-  DRY:   { color: "#D4900A", label: "Dry Patch" }
-};
+async function gasGet(params) {
+  const qs = Object.entries(params).map(([k,v])=>`${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+  const res = await fetch(`${GAS_URL}?${qs}`);
+  return res.json();
+}
 
-// --- API & HELPERS (Kept from your original) ---
 const api = {
-  getSpots: () => fetch(`${GAS_URL}?action=get_spots`).then(r => r.json()),
-  addSpot: (p) => fetch(`${GAS_URL}?action=add_spot&${new URLSearchParams(p)}`).then(r => r.json()),
-  // ... other API methods remain the same
+  getSpots:    ()           => gasGet({action:"get_spots"}),
+  getCreamLog: ()           => gasGet({action:"get_cream"}),
+  getAntiLog:  ()           => gasGet({action:"get_anti"}),
+  logCream:    p            => gasGet({action:"log_cream",...p}),
+  logAnti:     p            => gasGet({action:"log_anti",...p}),
+  addSpot:     p            => gasGet({action:"add_spot",...p}),
+  updateSpot:  (id,active)  => gasGet({action:"update_spot",spot_id:id,active:active?"1":"0"}),
+  renameSpot:  (id,name)    => gasGet({action:"rename_spot",spot_id:id,spot_name:name}),
+  deleteEntry: (eid,sheet)  => gasGet({action:"delete_entry",entry_id:eid,sheet}),
+  deleteSpot:  (id)         => gasGet({action:"delete_spot",spot_id:id}),
 };
 
-function BodySVG({ view, spots, selectedRegion, onSpotClick, onBodyClick, onRegionSelect }) {
-  const svgRef = useRef(null);
-  
-  // Dynamic Viewbox based on Zoom
-  const vb = selectedRegion ? `${REGIONS[selectedRegion].x} ${REGIONS[selectedRegion].y} ${REGIONS[selectedRegion].w} ${REGIONS[selectedRegion].h}` : "0 0 100 210";
+const genId    = () => Math.random().toString(36).slice(2,10)+Date.now().toString(36);
+const isActive = s => s.active==="1"||s.active===1||s.active===true;
+const sid      = s => s.id||s.spot_id;
+const getToday = () => new Date().toISOString().slice(0,10);
 
-  const handleSVGClick = (e) => {
-    const svg = svgRef.current;
-    const pt = svg.createSVGPoint();
-    pt.x = e.clientX; pt.y = e.clientY;
-    const cursorPT = pt.matrixTransform(svg.getScreenCTM().inverse());
-    
-    // If not zoomed, check if we should zoom into a region
-    if (!selectedRegion) {
-      if (cursorPT.y < 40) return onRegionSelect('HEAD');
-      if (cursorPT.y > 110) return onRegionSelect('LEGS');
-      return onRegionSelect('TORSO');
-    }
-    
-    onBodyClick(cursorPT.x, cursorPT.y);
+function spotLogs(logs,id){ return [...logs.filter(l=>l.spot_id===id)].sort((a,b)=>(b.date||"").localeCompare(a.date||"")); }
+
+function consecutiveDays(logs,id){
+  const sl=spotLogs(logs,id); if(!sl.length) return 0;
+  let n=0;
+  for(let i=0;i<30;i++){
+    const d=new Date(); d.setDate(d.getDate()-i);
+    const ds=d.toISOString().slice(0,10);
+    if(sl.some(l=>l.date===ds)) n++; else break;
+  }
+  return n;
+}
+
+function buildGrid(logs,id){
+  const sl=logs.filter(l=>l.spot_id===id);
+  const now=new Date(), dow=now.getDay(), toMon=(dow+6)%7;
+  const mon=new Date(now); mon.setDate(mon.getDate()-toMon); mon.setHours(0,0,0,0);
+  return Array.from({length:4},(_,w)=>
+    SLOTS.map(slot=>
+      Array.from({length:7},(_,d)=>{
+        const day=new Date(mon); day.setDate(day.getDate()-(3-w)*7+d);
+        const ds=day.toISOString().slice(0,10);
+        const m=sl.find(l=>l.date===ds&&l.slot===slot.id);
+        return m?m.cream_colour:null;
+      })
+    )
+  );
+}
+
+function weekLabels(){
+  const now=new Date(), toMon=(now.getDay()+6)%7;
+  const mon=new Date(now); mon.setDate(mon.getDate()-toMon);
+  return Array.from({length:4},(_,w)=>{
+    const d=new Date(mon); d.setDate(d.getDate()-(3-w)*7);
+    return d.toLocaleDateString("en-SG",{day:"numeric",month:"short"});
+  });
+}
+
+function fmtDate(ds){
+  if(!ds) return "";
+  const today=getToday();
+  const yest=new Date(); yest.setDate(yest.getDate()-1);
+  if(ds===today) return "Today";
+  if(ds===yest.toISOString().slice(0,10)) return "Yesterday";
+  return new Date(ds).toLocaleDateString("en-SG",{day:"numeric",month:"short"});
+}
+
+// ── BODY SVG ──────────────────────────────────────────────────────────────────
+function BodySVG({view,spots,onSpotClick,onBodyClick,svgRef}){
+  const sk="#EDD5C0",sd="#C9A080",ol="#A06840";
+  const G={fill:sk,stroke:ol,strokeWidth:0.85,strokeLinejoin:"round",strokeLinecap:"round"};
+  const Front=()=>(
+    <g {...G}>
+      <ellipse cx="38.5" cy="18" rx="2.8" ry="4.2"/><ellipse cx="61.5" cy="18" rx="2.8" ry="4.2"/>
+      <ellipse cx="50" cy="16" rx="12" ry="14"/>
+      <ellipse cx="45.5" cy="13" rx="2" ry="2.2" fill={sd} stroke="none"/><ellipse cx="54.5" cy="13" rx="2" ry="2.2" fill={sd} stroke="none"/>
+      <path d="M49,17 Q50,20.5 51,17" stroke={sd} strokeWidth="0.6" fill="none" strokeLinecap="round"/>
+      <path d="M46.5,23 Q50,26.5 53.5,23" stroke={sd} strokeWidth="0.9" fill="none" strokeLinecap="round"/>
+      <path d="M45.5,29 C45,32 45,36 46,38 L54,38 C55,36 55,32 54.5,29 Z"/>
+      <path d="M46,38 C40,38 27,39 22,43 C17,47 16,58 16,68 C16,79 18,90 21,97 C23,102 28,105 35,106 L65,106 C72,105 77,102 79,97 C82,90 84,79 84,68 C84,58 83,47 78,43 C73,39 60,38 54,38 Z"/>
+      <path d="M78,46 C83,49 89,58 91,71 C93,82 92,96 91,108 C90,114 88,119 87,122 L82,121 C81,117 81,111 80,105 C78,92 77,78 75,68 C73,57 74,49 78,46 Z"/>
+      <ellipse cx="84.5" cy="127" rx="5.5" ry="7"/>
+      <ellipse cx="80" cy="134" rx="1.9" ry="3.2"/><ellipse cx="84.5" cy="135.5" rx="1.9" ry="3.4"/><ellipse cx="89" cy="134.5" rx="1.9" ry="3.2"/><ellipse cx="92" cy="132" rx="1.7" ry="2.8"/>
+      <ellipse cx="78.5" cy="125.5" rx="1.8" ry="2.7" transform="rotate(28,78.5,125.5)"/>
+      <path d="M22,46 C17,49 11,58 9,71 C7,82 8,96 9,108 C10,114 12,119 13,122 L18,121 C19,117 19,111 20,105 C22,92 23,78 25,68 C27,57 26,49 22,46 Z"/>
+      <ellipse cx="15.5" cy="127" rx="5.5" ry="7"/>
+      <ellipse cx="20" cy="134" rx="1.9" ry="3.2"/><ellipse cx="15.5" cy="135.5" rx="1.9" ry="3.4"/><ellipse cx="11" cy="134.5" rx="1.9" ry="3.2"/><ellipse cx="8" cy="132" rx="1.7" ry="2.8"/>
+      <ellipse cx="21.5" cy="125.5" rx="1.8" ry="2.7" transform="rotate(-28,21.5,125.5)"/>
+      <path d="M59,106 C64,106 71,107 73,114 C75,121 75,135 74,148 C73,156 71,162 69,166 L59,166 C57,162 55,156 54,148 C53,135 53,121 55,114 C57,109 57,106 59,106 Z"/>
+      <path d="M59,166 C64,166 69,167 71,174 C73,180 72,188 70,192 L60,192 C58,188 57,180 55,174 C53,167 54,166 59,166 Z"/>
+      <path d="M60,192 C64,192 69,192 71,195 L73,200 C74,202 72,202 68,202 L54,202 C51,202 50,200 50,198 L52,195 C55,192 57,192 60,192 Z"/>
+      <ellipse cx="55" cy="199" rx="2.2" ry="1.8" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="59" cy="200.5" rx="2.2" ry="1.8" fill={sk} stroke={ol} strokeWidth="0.6"/>
+      <ellipse cx="63" cy="200.5" rx="2" ry="1.7" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="66.5" cy="199.5" rx="1.8" ry="1.5" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="69.5" cy="197.5" rx="1.6" ry="1.4" fill={sk} stroke={ol} strokeWidth="0.6"/>
+      <path d="M41,106 C36,106 29,107 27,114 C25,121 25,135 26,148 C27,156 29,162 31,166 L41,166 C43,162 45,156 46,148 C47,135 47,121 45,114 C43,109 43,106 41,106 Z"/>
+      <path d="M41,166 C36,166 31,167 29,174 C27,180 28,188 30,192 L40,192 C42,188 43,180 45,174 C47,167 46,166 41,166 Z"/>
+      <path d="M40,192 C36,192 31,192 29,195 L27,200 C26,202 28,202 32,202 L46,202 C49,202 50,200 50,198 L48,195 C45,192 43,192 40,192 Z"/>
+      <ellipse cx="45" cy="199" rx="2.2" ry="1.8" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="41" cy="200.5" rx="2.2" ry="1.8" fill={sk} stroke={ol} strokeWidth="0.6"/>
+      <ellipse cx="37" cy="200.5" rx="2" ry="1.7" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="33.5" cy="199.5" rx="1.8" ry="1.5" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="30.5" cy="197.5" rx="1.6" ry="1.4" fill={sk} stroke={ol} strokeWidth="0.6"/>
+    </g>
+  );
+  const Back=()=>(
+    <g {...G}>
+      <ellipse cx="38.5" cy="18" rx="2.8" ry="4.2"/><ellipse cx="61.5" cy="18" rx="2.8" ry="4.2"/>
+      <ellipse cx="50" cy="16" rx="12" ry="14"/>
+      <ellipse cx="50" cy="8" rx="12" ry="8.5" fill={sd} stroke="none"/>
+      <path d="M45.5,29 C45,32 45,36 46,38 L54,38 C55,36 55,32 54.5,29 Z"/>
+      <path d="M46,38 C40,38 27,39 22,43 C17,47 16,58 16,68 C16,79 18,90 21,97 C23,102 28,105 35,106 L65,106 C72,105 77,102 79,97 C82,90 84,79 84,68 C84,58 83,47 78,43 C73,39 60,38 54,38 Z"/>
+      <path d="M50,42 L50,104" stroke={sd} strokeWidth="0.6" fill="none" strokeDasharray="2.5,2.5"/>
+      <path d="M78,46 C83,49 89,58 91,71 C93,82 92,96 91,108 C90,114 88,119 87,122 L82,121 C81,117 81,111 80,105 C78,92 77,78 75,68 C73,57 74,49 78,46 Z"/>
+      <ellipse cx="84.5" cy="127" rx="5.5" ry="7"/>
+      <ellipse cx="80" cy="134" rx="1.9" ry="3.2"/><ellipse cx="84.5" cy="135.5" rx="1.9" ry="3.4"/><ellipse cx="89" cy="134.5" rx="1.9" ry="3.2"/><ellipse cx="92" cy="132" rx="1.7" ry="2.8"/>
+      <ellipse cx="78.5" cy="125.5" rx="1.8" ry="2.7" transform="rotate(28,78.5,125.5)"/>
+      <path d="M22,46 C17,49 11,58 9,71 C7,82 8,96 9,108 C10,114 12,119 13,122 L18,121 C19,117 19,111 20,105 C22,92 23,78 25,68 C27,57 26,49 22,46 Z"/>
+      <ellipse cx="15.5" cy="127" rx="5.5" ry="7"/>
+      <ellipse cx="20" cy="134" rx="1.9" ry="3.2"/><ellipse cx="15.5" cy="135.5" rx="1.9" ry="3.4"/><ellipse cx="11" cy="134.5" rx="1.9" ry="3.2"/><ellipse cx="8" cy="132" rx="1.7" ry="2.8"/>
+      <ellipse cx="21.5" cy="125.5" rx="1.8" ry="2.7" transform="rotate(-28,21.5,125.5)"/>
+      <path d="M59,106 C64,106 71,107 73,114 C75,121 75,135 74,148 C73,156 71,162 69,166 L59,166 C57,162 55,156 54,148 C53,135 53,121 55,114 C57,109 57,106 59,106 Z"/>
+      <path d="M59,166 C64,166 69,167 71,174 C73,180 72,188 70,192 L60,192 C58,188 57,180 55,174 C53,167 54,166 59,166 Z"/>
+      <path d="M60,192 C64,192 69,192 71,195 L73,200 C74,202 72,202 68,202 L54,202 C51,202 50,200 50,198 L52,195 C55,192 57,192 60,192 Z"/>
+      <ellipse cx="55" cy="199" rx="2.2" ry="1.8" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="59" cy="200.5" rx="2.2" ry="1.8" fill={sk} stroke={ol} strokeWidth="0.6"/>
+      <ellipse cx="63" cy="200.5" rx="2" ry="1.7" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="66.5" cy="199.5" rx="1.8" ry="1.5" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="69.5" cy="197.5" rx="1.6" ry="1.4" fill={sk} stroke={ol} strokeWidth="0.6"/>
+      <path d="M41,106 C36,106 29,107 27,114 C25,121 25,135 26,148 C27,156 29,162 31,166 L41,166 C43,162 45,156 46,148 C47,135 47,121 45,114 C43,109 43,106 41,106 Z"/>
+      <path d="M41,166 C36,166 31,167 29,174 C27,180 28,188 30,192 L40,192 C42,188 43,180 45,174 C47,167 46,166 41,166 Z"/>
+      <path d="M40,192 C36,192 31,192 29,195 L27,200 C26,202 28,202 32,202 L46,202 C49,202 50,200 50,198 L48,195 C45,192 43,192 40,192 Z"/>
+      <ellipse cx="45" cy="199" rx="2.2" ry="1.8" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="41" cy="200.5" rx="2.2" ry="1.8" fill={sk} stroke={ol} strokeWidth="0.6"/>
+      <ellipse cx="37" cy="200.5" rx="2" ry="1.7" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="33.5" cy="199.5" rx="1.8" ry="1.5" fill={sk} stroke={ol} strokeWidth="0.6"/><ellipse cx="30.5" cy="197.5" rx="1.6" ry="1.4" fill={sk} stroke={ol} strokeWidth="0.6"/>
+    </g>
+  );
+  const Side=({flip})=>(
+    <g {...G} transform={flip?"scale(-1,1) translate(-100,0)":""}>
+      <ellipse cx="39" cy="18" rx="3" ry="4.5"/>
+      <ellipse cx="50" cy="16" rx="12" ry="14"/>
+      <path d="M62,12 C67,15 68,20 65,24" stroke={sd} strokeWidth="1.2" fill="none" strokeLinecap="round"/>
+      <path d="M63,27 C65,30 63,32 62,33" stroke={sd} strokeWidth="0.8" fill="none" strokeLinecap="round"/>
+      <path d="M46,30 L48,38 L58,38 L60,30 Z"/>
+      <path d="M58,38 C64,40 70,46 70,58 C70,66 67,72 66,80 C65,87 66,93 68,102 C69,106 68,110 65,112 L62,112 C60,110 58,106 57,102 C55,93 54,86 52,80 C50,73 48,66 36,58 C33,52 34,44 37,40 C40,38 46,38 48,38 Z"/>
+      <path d="M68,50 C74,54 80,64 82,76 C84,87 83,101 82,112 C81,118 79,123 78,126 L73,125 C72,121 72,115 71,109 C69,97 68,83 66,73 C64,62 64,54 68,50 Z"/>
+      <ellipse cx="75.5" cy="131" rx="5" ry="6.5"/>
+      <ellipse cx="72" cy="137.5" rx="1.8" ry="3"/><ellipse cx="76" cy="139" rx="1.8" ry="3.2"/><ellipse cx="80" cy="137.5" rx="1.8" ry="3"/>
+      <ellipse cx="71" cy="130" rx="1.6" ry="2.4" transform="rotate(30,71,130)"/>
+      <path d="M36,48 C30,52 24,62 22,74 C20,85 21,99 22,110 L27,110 C27,99 27,85 29,74 C30,64 34,52 36,48 Z" opacity="0.4"/>
+      <path d="M44,112 C48,112 66,112 68,120 C70,128 70,142 69,154 C68,162 66,168 64,172 L52,172 C50,168 48,162 47,154 C46,142 46,128 44,120 C42,114 42,112 44,112 Z"/>
+      <path d="M52,172 C56,172 63,173 65,180 C67,186 66,193 64,197 L53,197 C51,193 50,186 48,180 C46,173 48,172 52,172 Z"/>
+      <path d="M53,197 C57,197 63,197 65,200 L68,204 C70,207 68,208 63,208 L50,208 C47,208 46,206 46,204 L48,200 C50,197 52,197 53,197 Z"/>
+      <path d="M36,112 C38,112 56,112 58,120 C60,128 60,142 59,154 C58,162 56,168 54,172 L42,172 C40,168 38,162 37,154 C36,142 36,128 34,120 C32,114 34,112 36,112 Z" opacity="0.38"/>
+      <path d="M42,172 C46,172 52,173 54,180 C56,186 55,193 53,197 L41,197 C40,193 39,186 37,180 C36,174 37,172 42,172 Z" opacity="0.38"/>
+      <path d="M41,197 C44,197 50,197 52,200 L55,204 C57,207 55,208 50,208 L37,208 C35,208 34,206 34,204 L36,200 C38,197 40,197 41,197 Z" opacity="0.38"/>
+    </g>
+  );
+  const handleClick=e=>{
+    const svg=svgRef.current; if(!svg) return;
+    const rect=svg.getBoundingClientRect();
+    const x=((e.clientX-rect.left)/rect.width)*100;
+    const y=((e.clientY-rect.top)/rect.height)*210;
+    onBodyClick(x,y);
   };
-
-  return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-      {selectedRegion && <div className="region-label">{REGIONS[selectedRegion].label}</div>}
-      <svg ref={svgRef} viewBox={vb} onClick={handleSVGClick} style={{ width: '100%', height: '100%', transition: 'all 0.4s ease-in-out' }}>
-        {/* Your original Body Paths go here (simplified for proto) */}
-        <g fill="#EDD5C0" stroke="#A06840" strokeWidth="0.8">
-          <ellipse cx="50" cy="16" rx="12" ry="14" /> {/* Head */}
-          <path d="M35,106 L65,106 C72,105 79,102 79,97 C84,68 84,38 54,38 Z" /> {/* Body */}
-          {/* ... Add your full path set here ... */}
-        </g>
-
-        {/* SPOTS with Larger Hit Areas */}
-        {spots.filter(s => s.view === view).map(s => (
-          <g key={s.id} onClick={(e) => { e.stopPropagation(); onSpotClick(s); }}>
-            <circle cx={s.x} cy={s.y} r={selectedRegion ? 4 : 8} fill="transparent" /> {/* Hit Area */}
-            <circle cx={s.x} cy={s.y} r={selectedRegion ? 2.5 : 4} fill={SPOT_TYPES[s.type || 'FLARE'].color} />
+  return(
+    <svg ref={svgRef} viewBox="0 0 100 210" style={{width:"100%",height:"100%",cursor:"crosshair"}} onClick={handleClick}>
+      {view==="FRONT"&&<Front/>}{view==="BACK"&&<Back/>}{view==="RIGHT"&&<Side flip={false}/>}{view==="LEFT"&&<Side flip={true}/>}
+      {spots.filter(s=>s.view===view).map(s=>{
+        const act=isActive(s);
+        const col=act&&s.lastCream?CREAMS[s.lastCream]?.color:act?"#888":"#C0B8B0";
+        return(
+          <g key={sid(s)} onClick={e=>{e.stopPropagation();onSpotClick(s);}} style={{cursor:"pointer"}}>
+            <circle cx={s.x} cy={s.y} r="8" fill={col} opacity="0.2"/>
+            <circle cx={s.x} cy={s.y} r="4.8" fill={col} opacity={act?0.9:0.4}/>
+            {s.consecutive>=7&&<><circle cx={s.x+7} cy={s.y-7} r="4.5" fill="#C1121F"/><text x={s.x+7} y={s.y-4.5} textAnchor="middle" fontSize="5.5" fill="#fff" fontWeight="bold">!</text></>}
           </g>
-        ))}
-      </svg>
+        );
+      })}
+    </svg>
+  );
+}
+
+function EditableName({name,onSave}){
+  const [editing,setEditing]=useState(false);
+  const [val,setVal]=useState(name);
+  const ref=useRef(null);
+  useEffect(()=>{if(editing)setTimeout(()=>ref.current?.focus(),100);},[editing]);
+  const save=()=>{if(val.trim()&&val.trim()!==name)onSave(val.trim());setEditing(false);};
+  if(editing) return(
+    <div style={{display:"flex",alignItems:"center",gap:8,flex:1}}>
+      <input ref={ref} value={val} onChange={e=>setVal(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")save();if(e.key==="Escape")setEditing(false);}}
+        style={{flex:1,fontSize:17,fontWeight:700,color:"#1E0F0A",border:"none",borderBottom:"2px solid #C1121F",background:"transparent",outline:"none",padding:"2px 0"}}/>
+      <button onClick={save} style={{background:"#1E0F0A",color:"#fff",border:"none",borderRadius:8,padding:"4px 10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>Save</button>
+      <button onClick={()=>setEditing(false)} style={{background:"#F0EBE5",color:"#7A6A60",border:"none",borderRadius:8,padding:"4px 10px",fontSize:12,cursor:"pointer"}}>✕</button>
+    </div>
+  );
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:8}}>
+      <div style={{fontWeight:700,fontSize:18,color:"#1E0F0A",letterSpacing:"-0.3px"}}>{name}</div>
+      <button onClick={()=>{setVal(name);setEditing(true);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:13,color:"#B4A49A",padding:"2px 4px"}}>✏️</button>
     </div>
   );
 }
 
-function App() {
-  const [region, setRegion] = useState(null);
-  const [spots, setSpots] = useState([]);
-  const [view, setView] = useState("FRONT");
-
-  // Add your existing useEffect for loading here...
-
-  return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <header style={{ padding: 20, background: '#fff' }}>
-        <h3>Lila's Tracker</h3>
-        <p style={{ fontSize: 12, color: '#999' }}>{region ? "Tap to add spot" : "Select region to zoom"}</p>
-      </header>
-
-      <div style={{ flex: 1, position: 'relative' }}>
-        <BodySVG 
-          view={view} 
-          spots={spots} 
-          selectedRegion={region} 
-          onRegionSelect={setRegion}
-          onSpotClick={(s) => console.log("Spot:", s)}
-          onBodyClick={(x,y) => console.log("New Spot at:", x, y)}
-        />
-        
-        {region && (
-          <button className="zoom-btn" onClick={() => setRegion(null)}>
-            ← Zoom Out
-          </button>
-        )}
+function AddSpotModal({onConfirm,onCancel}){
+  const [name,setName]=useState(""); const ref=useRef(null);
+  useEffect(()=>{setTimeout(()=>ref.current?.focus(),150);},[]);
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(30,15,10,0.5)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 24px"}} onClick={onCancel}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#FDFAF7",borderRadius:20,padding:24,width:"100%",maxWidth:360,boxShadow:"0 8px 40px rgba(0,0,0,0.22)"}}>
+        <div style={{fontSize:16,fontWeight:700,color:"#1E0F0A",marginBottom:5}}>Name this spot</div>
+        <div style={{fontSize:12,color:"#9B8B7E",marginBottom:16}}>e.g. "Right inner elbow", "Left cheek"</div>
+        <input ref={ref} value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&name.trim())onConfirm(name.trim());}} placeholder="Spot name..."
+          style={{width:"100%",padding:"12px 14px",borderRadius:10,border:"1.5px solid #EDE7E0",fontSize:15,outline:"none",background:"#FDFAF7",marginBottom:14,color:"#1E0F0A"}}/>
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={onCancel} style={{flex:1,padding:"12px",borderRadius:12,border:"none",background:"#F0EBE5",color:"#7A6A60",fontWeight:600,fontSize:14,cursor:"pointer"}}>Cancel</button>
+          <button onClick={()=>{if(name.trim())onConfirm(name.trim());}} style={{flex:2,padding:"12px",borderRadius:12,border:"none",background:name.trim()?"#1E0F0A":"#D4C4B8",color:name.trim()?"#fff":"#9B8B7E",fontWeight:700,fontSize:14,cursor:name.trim()?"pointer":"default",transition:"all 0.15s"}}>Add Spot</button>
+        </div>
       </div>
-      
-      {/* Navigation Tabs */}
-      <footer style={{ height: 60, background: '#fff', display: 'flex' }}>
-         {/* Your original tab logic here */}
-      </footer>
+    </div>
+  );
+}
+
+function LogModal({spot,onConfirm,onCancel}){
+  const [slot,setSlot]=useState(null);
+  const [cream,setCream]=useState(null);
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(30,15,10,0.5)",zIndex:300,display:"flex",alignItems:"flex-end"}} onClick={onCancel}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#FDFAF7",borderRadius:"22px 22px 0 0",width:"100%",padding:"20px 20px 44px",boxShadow:"0 -6px 40px rgba(0,0,0,0.18)"}}>
+        <div style={{display:"flex",justifyContent:"center",marginBottom:16}}><div style={{width:40,height:4,borderRadius:2,background:"#E2D8D0"}}/></div>
+        <div style={{fontSize:16,fontWeight:700,color:"#1E0F0A",marginBottom:4}}>Log Application</div>
+        <div style={{fontSize:12,color:"#9B8B7E",marginBottom:18}}>{spot.name||spot.spot_name}</div>
+        {!slot&&<>
+          <div style={{fontSize:11,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:"#9B8B7E",marginBottom:12}}>When?</div>
+          <div style={{display:"flex",gap:10,marginBottom:18}}>
+            {SLOTS.map(s=>(
+              <button key={s.id} onClick={()=>setSlot(s.id)} style={{flex:1,padding:"18px 12px",borderRadius:14,border:"2px solid #EDE7E0",background:"#F8F4F0",cursor:"pointer"}}>
+                <div style={{fontSize:28,marginBottom:6}}>{s.emoji}</div>
+                <div style={{fontSize:14,fontWeight:600,color:"#1E0F0A"}}>{s.label}</div>
+              </button>
+            ))}
+          </div>
+        </>}
+        {slot&&<>
+          <button onClick={()=>setSlot(null)} style={{background:"#F0EBE5",border:"none",borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:13,color:"#7A6A60",marginBottom:16}}>← {SLOTS.find(s=>s.id===slot)?.emoji} {SLOTS.find(s=>s.id===slot)?.label}</button>
+          <div style={{fontSize:11,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:"#9B8B7E",marginBottom:12}}>Which cream?</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:18}}>
+            {Object.entries(CREAMS).map(([id,c])=>(
+              <button key={id} onClick={()=>setCream(id)} style={{padding:"16px 12px",borderRadius:14,border:`2.5px solid ${cream===id?c.color:"#EDE7E0"}`,background:cream===id?c.color+"18":"#F8F4F0",cursor:"pointer",display:"flex",alignItems:"center",gap:10,transition:"all 0.15s"}}>
+                <div style={{width:20,height:20,borderRadius:6,background:c.color,flexShrink:0}}/>
+                <span style={{fontSize:15,fontWeight:600,color:cream===id?"#1E0F0A":"#7A6A60"}}>{c.label}</span>
+              </button>
+            ))}
+          </div>
+          <button onClick={()=>{if(cream)onConfirm(slot,cream);}} style={{width:"100%",padding:"14px",borderRadius:14,border:"none",background:cream?"#1E0F0A":"#EDE7E0",color:cream?"#fff":"#B4A49A",fontWeight:700,fontSize:15,cursor:cream?"pointer":"default",transition:"all 0.15s"}}>
+            {cream?`Log ${SLOTS.find(s=>s.id===slot)?.emoji} ${CREAMS[cream].label}`:"Select a cream above"}
+          </button>
+        </>}
+      </div>
+    </div>
+  );
+}
+
+function SpotPanel({spot,logs,onClose,onLog,onToggleActive,onDeleteEntry,onDeleteSpot,onRename}){
+  const id=sid(spot);
+  const hist=spotLogs(logs,id);
+  const grid=buildGrid(logs,id);
+  const wl=weekLabels();
+  const cons=spot.consecutive||0;
+  const act=isActive(spot);
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(30,15,10,0.38)",zIndex:200,display:"flex",alignItems:"flex-end"}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#FDFAF7",borderRadius:"22px 22px 0 0",width:"100%",maxHeight:"88vh",display:"flex",flexDirection:"column",boxShadow:"0 -6px 40px rgba(0,0,0,0.18)"}}>
+        <div style={{display:"flex",justifyContent:"center",padding:"12px 0 0"}}><div style={{width:40,height:4,borderRadius:2,background:"#E2D8D0"}}/></div>
+        <div style={{padding:"12px 20px 10px",display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+          <div style={{flex:1}}><EditableName name={spot.name||spot.spot_name} onSave={onRename}/>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginTop:4}}>
+              <span style={{fontSize:12,fontWeight:600,color:act?"#2A9D8F":"#9B8B7E"}}>{act?"● Active":"○ Inactive"}</span>
+              {hist[0]&&<><span style={{fontSize:12,color:"#C8B8B0"}}>·</span><span style={{fontSize:12,color:"#9B8B7E"}}>Last: {fmtDate(hist[0].date)} {SLOTS.find(s=>s.id===hist[0].slot)?.emoji||""}</span></>}
+            </div>
+          </div>
+          <button onClick={onClose} style={{background:"#F0EBE5",border:"none",borderRadius:"50%",width:32,height:32,cursor:"pointer",fontSize:14,color:"#7A6A60",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>✕</button>
+        </div>
+        {cons>=7&&<div style={{margin:"0 20px 10px",background:"#FFF0F0",border:"1px solid #FFCDD2",borderRadius:10,padding:"9px 14px",display:"flex",gap:9,alignItems:"center"}}><span>⚠️</span><span style={{fontSize:12,color:"#C1121F",lineHeight:1.4}}>{cons} consecutive days — check with your dermatologist</span></div>}
+        <div style={{overflowY:"auto",flex:1}}>
+          <div style={{padding:"4px 20px 16px"}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:"#9B8B7E",marginBottom:10}}>30-Day History</div>
+            <div style={{display:"grid",gridTemplateColumns:"44px 18px repeat(7,1fr)",gap:2,marginBottom:3}}>
+              <div/><div/>
+              {DAYS.map((d,i)=><div key={i} style={{textAlign:"center",fontSize:10,fontWeight:700,color:"#B4A49A"}}>{d}</div>)}
+            </div>
+            {grid.map((week,wi)=>(
+              <div key={wi}>
+                {SLOTS.map((slot,si)=>(
+                  <div key={slot.id} style={{display:"grid",gridTemplateColumns:"44px 18px repeat(7,1fr)",gap:2,marginBottom:2}}>
+                    <div style={{fontSize:9,color:"#C4B8B0",display:"flex",alignItems:"center"}}>{si===0?wl[wi]:""}</div>
+                    <div style={{fontSize:10,display:"flex",alignItems:"center",justifyContent:"center"}}>{slot.emoji}</div>
+                    {week[si].map((cream,di)=>(
+                      <div key={di} style={{height:13,borderRadius:3,background:cream?CREAMS[cream]?.color:"#EDE7E0",opacity:cream?0.88:1}}/>
+                    ))}
+                  </div>
+                ))}
+                {wi<grid.length-1&&<div style={{height:5}}/>}
+              </div>
+            ))}
+            <div style={{display:"flex",gap:14,marginTop:10,flexWrap:"wrap"}}>
+              {Object.entries(CREAMS).map(([id,c])=>(
+                <div key={id} style={{display:"flex",alignItems:"center",gap:5}}>
+                  <div style={{width:10,height:10,borderRadius:2,background:c.color}}/><span style={{fontSize:11,color:"#9B8B7E"}}>{c.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={{height:1,background:"#EDE7E0",margin:"0 20px"}}/>
+          <div style={{padding:"14px 20px 28px"}}>
+            <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:"#9B8B7E",marginBottom:10}}>Applications</div>
+            {hist.length===0&&<div style={{fontSize:13,color:"#B4A49A",fontStyle:"italic"}}>No applications yet</div>}
+            {hist.map((e,i)=>{
+              const cc=CREAMS[e.cream_colour];
+              const slotInfo=SLOTS.find(s=>s.id===e.slot);
+              return(
+                <div key={e.entry_id||i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<hist.length-1?"1px solid #F0EBE5":"none"}}>
+                  <div style={{width:9,height:9,borderRadius:"50%",background:cc?.color||"#888",flexShrink:0}}/>
+                  <div style={{flex:1,fontSize:13,color:"#1E0F0A",fontWeight:500}}>{fmtDate(e.date)}</div>
+                  <div style={{fontSize:13}}>{slotInfo?.emoji}</div>
+                  <div style={{fontSize:12,fontWeight:700,color:cc?.color||"#888"}}>{cc?.label||e.cream_colour}</div>
+                  <button onClick={()=>onDeleteEntry(e.entry_id,"cream")} style={{background:"none",border:"none",cursor:"pointer",fontSize:15,color:"#C8B8B0",padding:"0 2px",lineHeight:1}}>🗑</button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div style={{padding:"12px 20px 36px",borderTop:"1px solid #EDE7E0",display:"flex",gap:10,flexShrink:0}}>
+          {act&&<button onClick={onLog} style={{flex:1,padding:"13px",borderRadius:12,background:"#1E0F0A",color:"#fff",border:"none",fontWeight:700,fontSize:14,cursor:"pointer"}}>Log Application</button>}
+          <button onClick={onToggleActive} style={{padding:"13px 14px",borderRadius:12,background:"#F0EBE5",color:"#7A6A60",border:"none",fontSize:13,cursor:"pointer",flex:act?0:1}}>{act?"Mark Inactive":"Reactivate"}</button>
+          <button onClick={onDeleteSpot} style={{padding:"13px 14px",borderRadius:12,background:"#FFF0F0",color:"#C1121F",border:"1px solid #FFCDD2",fontSize:13,cursor:"pointer"}}>Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AntihistamineTab({antiLog,onLog,onDelete}){
+  const [slot,setSlot]=useState(null);
+  const [dose,setDose]=useState(null);
+  const [logging,setLogging]=useState(false);
+  const sorted=[...antiLog].sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  const today=getToday();
+  const todaySlots=antiLog.filter(l=>l.date===today).map(l=>l.slot);
+  const alreadyLogged=slot&&todaySlots.includes(slot);
+  const doLog=async()=>{
+    if(!slot||!dose||logging||alreadyLogged) return;
+    setLogging(true); await onLog({slot,dose_ml:dose}); setSlot(null); setDose(null); setLogging(false);
+  };
+  return(
+    <div style={{flex:1,overflowY:"auto",padding:"16px 20px 0"}}>
+      <div style={{background:"#fff",borderRadius:16,padding:"18px",marginBottom:18,boxShadow:"0 2px 12px rgba(0,0,0,0.06)"}}>
+        <div style={{fontSize:16,fontWeight:700,color:"#1E0F0A",marginBottom:4}}>Cetirizine</div>
+        <div style={{fontSize:12,color:"#9B8B7E",marginBottom:14}}>{sorted[0]?`Last: ${fmtDate(sorted[0].date)} ${SLOTS.find(s=>s.id===sorted[0].slot)?.emoji||""}`:"No doses logged yet"}</div>
+        <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:"#9B8B7E",marginBottom:10}}>When was it given?</div>
+        <div style={{display:"flex",gap:10,marginBottom:14}}>
+          {SLOTS.map(s=>{
+            const done=todaySlots.includes(s.id);
+            return(
+              <button key={s.id} onClick={()=>!done&&setSlot(s.id)} style={{flex:1,padding:"14px 10px",borderRadius:12,border:`2px solid ${slot===s.id?"#1E0F0A":done?"#E8E0D8":"#EDE7E0"}`,background:done?"#F5F0EA":slot===s.id?"#1E0F0A":"#F8F4F0",cursor:done?"default":"pointer",transition:"all 0.15s"}}>
+                <div style={{fontSize:22,marginBottom:4}}>{s.emoji}</div>
+                <div style={{fontSize:13,fontWeight:600,color:done?"#B4A49A":slot===s.id?"#fff":"#1E0F0A"}}>{s.label}</div>
+                {done&&<div style={{fontSize:9,color:"#2A9D8F",fontWeight:700,marginTop:2}}>✓ Done</div>}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:"#9B8B7E",marginBottom:10}}>Dose</div>
+        <div style={{display:"flex",gap:10,marginBottom:14}}>
+          {["2.5ml","5ml"].map(d=>(
+            <button key={d} onClick={()=>setDose(d)} style={{flex:1,padding:"14px",borderRadius:12,border:`2px solid ${dose===d?"#1E0F0A":"#EDE7E0"}`,background:dose===d?"#1E0F0A":"#FDFAF7",color:dose===d?"#fff":"#1E0F0A",fontWeight:700,fontSize:20,cursor:"pointer",transition:"all 0.15s"}}>{d}</button>
+          ))}
+        </div>
+        <button onClick={doLog} style={{width:"100%",padding:"13px",borderRadius:12,border:"none",background:slot&&dose&&!alreadyLogged?"#C1121F":"#EDE7E0",color:slot&&dose&&!alreadyLogged?"#fff":"#B4A49A",fontWeight:700,fontSize:14,cursor:slot&&dose&&!alreadyLogged?"pointer":"default",transition:"all 0.15s",opacity:logging?0.6:1}}>
+          {logging?"Logging...":alreadyLogged?`Already logged ${SLOTS.find(s=>s.id===slot)?.label}`:slot&&dose?`Log ${SLOTS.find(s=>s.id===slot)?.emoji} ${dose}`:"Select time and dose above"}
+        </button>
+      </div>
+      <div style={{fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:"#9B8B7E",marginBottom:10}}>History</div>
+      <div style={{background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 2px 12px rgba(0,0,0,0.06)",marginBottom:32}}>
+        {sorted.length===0&&<div style={{padding:"18px",fontSize:13,color:"#B4A49A",fontStyle:"italic"}}>No doses logged yet</div>}
+        {sorted.map((e,i)=>{
+          const slotInfo=SLOTS.find(s=>s.id===e.slot);
+          return(
+            <div key={e.entry_id||i} style={{display:"flex",alignItems:"center",padding:"12px 18px",borderBottom:i<sorted.length-1?"1px solid #F5F0EA":"none",gap:10}}>
+              <div style={{width:8,height:8,borderRadius:"50%",background:"#9B8B7E",flexShrink:0}}/>
+              <div style={{flex:1,fontSize:13,color:"#1E0F0A"}}>{fmtDate(e.date)}</div>
+              <div style={{fontSize:14}}>{slotInfo?.emoji}</div>
+              <div style={{fontSize:13,fontWeight:700,color:"#1E0F0A"}}>{e.dose_ml}</div>
+              <button onClick={()=>onDelete(e.entry_id)} style={{background:"none",border:"none",cursor:"pointer",fontSize:15,color:"#C8B8B0",padding:"0 2px"}}>🗑</button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function App(){
+  const [viewIdx,setViewIdx]=useState(0);
+  const [tab,setTab]=useState("body");
+  const [spots,setSpots]=useState([]);
+  const [creamLog,setCreamLog]=useState([]);
+  const [antiLog,setAntiLog]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState(null);
+  const [selectedSpot,setSelectedSpot]=useState(null);
+  const [pendingCoords,setPendingCoords]=useState(null);
+  const [showLogModal,setShowLogModal]=useState(false);
+  const touchStartX=useRef(null);
+  const svgRef=useRef(null);
+  const view=VIEWS[viewIdx];
+
+  useEffect(()=>{
+    (async()=>{
+      try{
+        const [s,c,a]=await Promise.all([api.getSpots(),api.getCreamLog(),api.getAntiLog()]);
+        setSpots(s.rows||[]); setCreamLog(c.rows||[]); setAntiLog(a.rows||[]);
+      }catch(e){setError("Cannot connect. Check your internet connection.");}
+      finally{setLoading(false);}
+    })();
+  },[]);
+
+  const enriched=spots.map(s=>{
+    const id=s.id||s.spot_id;
+    return{...s,id,x:parseFloat(s.x),y:parseFloat(s.y),
+      lastCream:spotLogs(creamLog,id)[0]?.cream_colour||null,
+      consecutive:consecutiveDays(creamLog,id)};
+  });
+
+  const handleBodyClick=useCallback((x,y)=>{
+    const near=enriched.filter(s=>s.view===view).find(s=>Math.hypot(s.x-x,s.y-y)<8);
+    if(near)setSelectedSpot(near); else setPendingCoords({x,y});
+  },[enriched,view]);
+
+  const handleAddSpot=async(name)=>{
+    const id=genId();
+    const ns={id,spot_id:id,view,name,spot_name:name,x:Math.round(pendingCoords.x*10)/10,y:Math.round(pendingCoords.y*10)/10,active:"1"};
+    setPendingCoords(null); setSpots(p=>[...p,ns]);
+    try{await api.addSpot({spot_id:id,view,spot_name:name,x:ns.x,y:ns.y});}catch(e){}
+  };
+
+  const handleLogCream=async(slot,colour)=>{
+    setShowLogModal(false);
+    const spot=selectedSpot;
+    const id=genId();
+    const entry={entry_id:id,date:getToday(),slot,spot_id:sid(spot),spot_name:spot.name||spot.spot_name,view:spot.view,cream_colour:colour,x:spot.x,y:spot.y};
+    setCreamLog(p=>[entry,...p]); setSelectedSpot(null);
+    try{await api.logCream({entry_id:id,slot,spot_id:sid(spot),spot_name:spot.name||spot.spot_name,view:spot.view,cream_colour:colour,x:spot.x,y:spot.y});}catch(e){}
+  };
+
+  const handleLogAnti=async({slot,dose_ml})=>{
+    const id=genId();
+    const entry={entry_id:id,date:getToday(),slot,dose_ml};
+    setAntiLog(p=>[entry,...p]);
+    try{await api.logAnti({entry_id:id,slot,dose_ml});}catch(e){}
+  };
+
+  const handleDeleteEntry=async(entry_id,sheet)=>{
+    if(sheet==="cream") setCreamLog(p=>p.filter(l=>l.entry_id!==entry_id));
+    else setAntiLog(p=>p.filter(l=>l.entry_id!==entry_id));
+    try{await api.deleteEntry(entry_id,sheet);}catch(e){}
+  };
+
+  const handleDeleteSpot=async()=>{
+    const spot=selectedSpot;
+    if(!window.confirm(`Delete "${spot.name||spot.spot_name}"?`)) return;
+    setSpots(p=>p.filter(s=>(s.id||s.spot_id)!==sid(spot)));
+    setCreamLog(p=>p.filter(l=>l.spot_id!==sid(spot)));
+    setSelectedSpot(null);
+    try{await api.deleteSpot(sid(spot));}catch(e){}
+  };
+
+  const handleRename=async(name)=>{
+    const spot=selectedSpot;
+    setSpots(p=>p.map(s=>(s.id||s.spot_id)===sid(spot)?{...s,name,spot_name:name}:s));
+    setSelectedSpot(s=>s?{...s,name,spot_name:name}:s);
+    try{await api.renameSpot(sid(spot),name);}catch(e){}
+  };
+
+  const handleToggleActive=async()=>{
+    const spot=selectedSpot; const newAct=isActive(spot)?"0":"1";
+    setSpots(p=>p.map(s=>(s.id||s.spot_id)===sid(spot)?{...s,active:newAct}:s));
+    setSelectedSpot(null);
+    try{await api.updateSpot(sid(spot),newAct==="1");}catch(e){}
+  };
+
+  const handleTouchStart=e=>{touchStartX.current=e.touches[0].clientX;};
+  const handleTouchEnd=e=>{
+    if(touchStartX.current===null) return;
+    const dx=e.changedTouches[0].clientX-touchStartX.current;
+    if(Math.abs(dx)>50) setViewIdx(i=>dx<0?(i+1)%4:(i+3)%4);
+    touchStartX.current=null;
+  };
+
+  const sideLabels={FRONT:["R","L"],BACK:["L","R"],RIGHT:["F","B"],LEFT:["B","F"]};
+  const [lLabel,rLabel]=sideLabels[view];
+  const viewChips=enriched.filter(s=>s.view===view);
+  const selEnriched=selectedSpot?enriched.find(s=>s.id===sid(selectedSpot))||selectedSpot:null;
+
+  if(loading) return(<div style={{height:"100%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,background:"#F5EFE8"}}><div style={{fontSize:32}}>🌿</div><div style={{fontSize:14,color:"#9B8B7E"}}>Loading Lila's tracker…</div></div>);
+  if(error) return(<div style={{height:"100%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,padding:28,background:"#F5EFE8",textAlign:"center"}}><div style={{fontSize:28}}>⚠️</div><div style={{fontSize:14,color:"#C1121F"}}>{error}</div></div>);
+
+  return(
+    <div style={{height:"100%",maxWidth:430,margin:"0 auto",display:"flex",flexDirection:"column",background:"#F5EFE8",position:"relative",overflow:"hidden"}}>
+      <div style={{background:"#fff",padding:"16px 20px 12px",borderBottom:"1px solid #EDE7E0",flexShrink:0}}>
+        <div style={{fontSize:10,color:"#B4A49A",letterSpacing:2,textTransform:"uppercase",marginBottom:2}}>Skin Log</div>
+        <div style={{fontSize:20,fontWeight:700,color:"#1E0F0A",letterSpacing:"-0.5px"}}>Lila's Tracker</div>
+      </div>
+
+      {tab==="body"?(
+        <div style={{flex:1,display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
+          <div style={{padding:"10px 0 2px",textAlign:"center",flexShrink:0}}>
+            <div style={{display:"flex",justifyContent:"center",gap:5,marginBottom:7}}>
+              {VIEWS.map((v,i)=>(
+                <div key={v} onClick={()=>setViewIdx(i)} style={{height:5,borderRadius:3,cursor:"pointer",width:i===viewIdx?22:5,background:i===viewIdx?"#C1121F":"#D4C4B8",transition:"width 0.25s"}}/>
+              ))}
+            </div>
+            <div style={{fontSize:11,fontWeight:700,letterSpacing:2.5,color:"#7A6A60",textTransform:"uppercase"}}>{view}</div>
+            <div style={{fontSize:10,color:"#C4B0A4",marginTop:1}}>swipe to rotate · tap body to add spot</div>
+          </div>
+          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 6px",minHeight:0}}>
+            <div style={{fontSize:12,fontWeight:800,color:"#C1121F",width:20,textAlign:"center"}}>{lLabel}</div>
+            <div style={{flex:1,maxWidth:150,aspectRatio:"100/210"}}><BodySVG view={view} spots={enriched} onSpotClick={setSelectedSpot} onBodyClick={handleBodyClick} svgRef={svgRef}/></div>
+            <div style={{fontSize:12,fontWeight:800,color:"#C1121F",width:20,textAlign:"center"}}>{rLabel}</div>
+          </div>
+          <div style={{padding:"5px 16px 12px",display:"flex",gap:7,flexWrap:"wrap",flexShrink:0}}>
+            {viewChips.length===0&&<div style={{fontSize:12,color:"#B4A49A",fontStyle:"italic",padding:"4px 2px"}}>No spots — tap body to add</div>}
+            {viewChips.filter(s=>isActive(s)).map(s=>(
+              <div key={sid(s)} onClick={()=>setSelectedSpot(s)} style={{display:"flex",alignItems:"center",gap:6,background:"#fff",borderRadius:20,padding:"6px 12px",boxShadow:"0 1px 5px rgba(0,0,0,0.08)",cursor:"pointer",border:s.consecutive>=7?"1.5px solid #C1121F":"1.5px solid transparent"}}>
+                <div style={{width:8,height:8,borderRadius:"50%",background:s.lastCream?CREAMS[s.lastCream]?.color:"#9B8B7E"}}/>
+                <span style={{fontSize:12,fontWeight:600,color:"#1E0F0A"}}>{s.name||s.spot_name}</span>
+                {s.consecutive>=7&&<span style={{fontSize:10,color:"#C1121F"}}>⚠</span>}
+              </div>
+            ))}
+            {viewChips.filter(s=>!isActive(s)).map(s=>(
+              <div key={sid(s)} onClick={()=>setSelectedSpot(s)} style={{display:"flex",alignItems:"center",gap:6,background:"#EDE7E0",borderRadius:20,padding:"6px 12px",cursor:"pointer",opacity:0.65}}>
+                <div style={{width:8,height:8,borderRadius:"50%",background:"#B4A49A"}}/>
+                <span style={{fontSize:12,color:"#7A6A60"}}>{s.name||s.spot_name}</span>
+                <span style={{fontSize:10,color:"#9B8B7E"}}>inactive</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ):(
+        <AntihistamineTab antiLog={antiLog} onLog={handleLogAnti} onDelete={id=>handleDeleteEntry(id,"anti")}/>
+      )}
+
+      <div style={{background:"#fff",borderTop:"1px solid #EDE7E0",display:"flex",paddingBottom:8,flexShrink:0}}>
+        {[{id:"body",label:"Body Map",icon:"🧍"},{id:"anti",label:"Antihistamine",icon:"💊"}].map(t=>(
+          <div key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,padding:"8px 0 4px",textAlign:"center",cursor:"pointer",borderTop:`2.5px solid ${tab===t.id?"#C1121F":"transparent"}`}}>
+            <div style={{fontSize:20}}>{t.icon}</div>
+            <div style={{fontSize:11,marginTop:2,fontWeight:tab===t.id?700:400,color:tab===t.id?"#C1121F":"#9B8B7E"}}>{t.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {pendingCoords&&<AddSpotModal onConfirm={handleAddSpot} onCancel={()=>setPendingCoords(null)}/>}
+      {selEnriched&&!showLogModal&&<SpotPanel spot={selEnriched} logs={creamLog} onClose={()=>setSelectedSpot(null)} onLog={()=>setShowLogModal(true)} onToggleActive={handleToggleActive} onDeleteEntry={handleDeleteEntry} onDeleteSpot={handleDeleteSpot} onRename={handleRename}/>}
+      {selEnriched&&showLogModal&&<LogModal spot={selEnriched} onConfirm={handleLogCream} onCancel={()=>setShowLogModal(false)}/>}
     </div>
   );
 }
